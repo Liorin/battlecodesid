@@ -14,81 +14,122 @@ import java.util.*;
  */
 
 
-class PathElement {
-    public MapLocation loc;
-    public MapLocation previous;
-    public double cost;
-    
-    public PathElement(MapLocation m, double c, MapLocation prev) {
-        this.loc = m;
-        this.cost = c;
-        this.previous = prev;
-    }
-
-    public boolean equals(PathElement p){
-        if (p == null) {
-            return false;
-        }
-        if (p == this) {
-            return true;
-        }
-        if ((this.cost == p.cost) && (this.loc.equals(p.loc)) ) {
-            return true;
-        }
-        return false;
-    }
-}
-
-
-class MapComparator implements Comparator<PathElement> {
-    private MapLocation target;
-
-    public MapComparator (MapLocation t ) {
-        this.target = t;
-    }
-
-    public int estimate(MapLocation m1) {
-        return m1.distanceSquaredTo(this.target);
-    }
-
-    public int compare(PathElement m1, PathElement m2) {
-        /*we assume that there are no nulls*/
-        if (m1.equals(m2)) {
-            return 0;
-        }
-
-        double c1,c2;
-        c1 = m1.cost;
-        c2 = m2.cost;
-        if ((c1 +  this.estimate(m1.loc)) > (c2 + this.estimate(m2.loc) ) ) {
-            return 1;
-        }
-        if ((c1 +  this.estimate(m1.loc)) < (c2 + this.estimate(m2.loc) ) ) {
-            return -1;
-        }
-
-        return 0;
-    }
-}
-
 public class RobotPlayer implements Runnable {
 
-    public enum RobotState {START, FLUX_SEARCH, FLUX_GATHER, FLUX_CAPTURE, BLOCK_RETURN, BLOCK_SEARCH, BLOCK_GATHER, FIND_ENERGON}
+    public enum RobotState {START, BLOCK_WAIT, FOLLOW_ARCHON, BLOCK_SEARCH_START, FLUX_SEARCH, FLUX_GATHER, FLUX_CAPTURE, BLOCK_RETURN, BLOCK_SEARCH, BLOCK_GATHER, FIND_ENERGON}
 
 
     private final RobotController myRC;
     private RobotState state, prevState;
     private int archonNumber = 1;
+    private int workerCount = 0;
+    private int waiting = 0;
+    
     private boolean hasBlocks = false;
 
+    /*Location and info about currently exploited flux deposit*/
     public FluxDeposit currentFluxDeposit;
     public MapLocation currentFluxDepositLoc;
     public MapLocation archonLocation[]; 
-    public MapLocation forbidden;
+    
+    /*Shows the direction of stairs to the flux depo*/
+    public Direction stairs = null;
+    
+    /*variables needed by the workers*/
+    private MapLocation currentTarget = null;
+    
+    
     public RobotPlayer(RobotController myRC) {
         this.myRC = myRC;
         this.state = RobotState.START;
     }
+    
+    private void refillAdjacent() {
+        try {
+            
+            for (Direction d : Direction.values()) {
+                if (d != Direction.NONE && d != Direction.OMNI) {
+                    MapLocation loc = myRC.getLocation().add(d);
+                    Robot r = myRC.senseGroundRobotAtLocation(loc);
+                    if (r != null) {
+                        myRC.transferEnergon(1, loc, RobotLevel.ON_GROUND);
+                        myRC.yield();
+                    }
+                }
+            }
+        } catch (Exception e) {}
+        
+    }
+
+    private int dirToInt(Direction d) {
+        if (d == null) {
+            return 0;
+        }
+
+        switch (d) {
+            case EAST: return 1;
+            case NORTH: return 2;
+            case WEST: return 3;
+            case SOUTH: return 4;
+        }
+
+        return 0;
+    }
+
+    private Direction intToDir(int i) {
+        switch (i) {
+            case 1: return Direction.EAST;
+            case 2: return Direction.NORTH;
+            case 3: return Direction.WEST;
+            case 4: return Direction.SOUTH;
+        }
+        return Direction.NONE;
+    }
+
+    private MapLocation addToLoc(MapLocation loc, Direction dir, int count) {
+        if (count <= 0) {
+            return loc;
+        }
+        MapLocation tempLoc = loc;
+        for (int j = 0; j < count; j++) {
+            tempLoc = tempLoc.add(dir);
+        }
+        return tempLoc;
+    }
+    
+    private boolean isPassable(MapLocation loc) {
+        try {
+            TerrainTile t = myRC.senseTerrainTile(loc);
+            if (t.getType() == TerrainTile.TerrainType.LAND ) {
+                return true;
+            }
+        } catch (Exception e) {return false;}
+        return false;
+    }
+    
+    private Direction findStairs(MapLocation start) {
+        Direction dir = Direction.EAST; /*na wschodzie musi byc jakaś cywilizacja*/
+        int count = 0;
+        int free_fields;
+        MapLocation tempLoc;
+        while (count < 4) {
+            free_fields = 0;
+            tempLoc = start.add(dir);
+            while ( isPassable(tempLoc)) {
+                free_fields++;
+                tempLoc = tempLoc.add(dir);
+                if (free_fields >= 5) {
+                    return dir;
+                }
+            }
+            count++;
+            dir = dir.rotateRight().rotateRight();
+        }
+        
+        return null;
+        
+    }
+    
 
     private boolean move(Direction dir) {
         try {
@@ -106,99 +147,14 @@ public class RobotPlayer implements Runnable {
         return true;
     }
 
-    private int findLocation(List<PathElement> l, MapLocation m) {
-        int ret = 0;
-        Iterator<PathElement> iter = l.iterator();
-        while(iter.hasNext()) {
-            PathElement p = iter.next();
-            if (p.loc.equals(m)) {
-                return ret;
-            }
-            ret++;
-        }
-        return -1;
-    }
-
-    private LinkedList<PathElement> localPathFind(MapLocation start, MapLocation end) {
-        if (start == null || end == null || start.equals(end)) {
-            return null;
-        }
-
-        Comparator<PathElement> comp = new MapComparator(end);
-        PathElement startElement = new PathElement(start, 0, null);
-        PathElement p;
-        PriorityQueue<PathElement> queue = new PriorityQueue<PathElement>(100, comp);
-        List<PathElement> visited = new LinkedList<PathElement>();
-        queue.offer(startElement);
-        while (true) {
-            if (queue.isEmpty()) {
-                return null;
-            }
-            p = queue.poll();
-            visited.add(p); 
-            if (p.loc.equals(end)) {
-                /* if we found the target, break from the loop*/
-                break;
-            }
-            /*if not, add neighbours to priority queue*/
-            for (Direction d : Direction.values()) {
-                if (d != Direction.OMNI && d != Direction.NONE) {
-                    TerrainTile tile;
-                    MapLocation loc = p.loc;
-                    MapLocation newLoc = p.loc.add(d);
-                    if (!myRC.canSenseSquare(newLoc)) {
-                        continue;
-                    }
-                   
-                    tile = myRC.senseTerrainTile(newLoc);
-                    boolean robotsPresent = false;
-                    
-                    try {
-                        switch (myRC.getRobotType()) {
-                            case ARCHON:
-                                robotsPresent = !(myRC.senseAirRobotAtLocation(newLoc) == null);
-                                break;
-                            case WORKER:
-                                robotsPresent = !(myRC.senseGroundRobotAtLocation(newLoc) == null);
-                               
-                                break;
-                        }
-                    } catch (Exception e) {}
-                    if  ( (findLocation(visited, p.loc) < 0) &&
-                            (tile != null) && 
-                            (tile.isTraversableAtHeight(myRC.getRobot().getRobotLevel())) &&
-                            (!robotsPresent) ) {
-                        queue.offer(new PathElement(newLoc, p.cost+loc.distanceSquaredTo(newLoc) ,loc));
-                    }
-                }
-            }                  
-        }
-        /*we are outside the loop, it means that we found the path
-         so, now we need to get actual set of MapLocations from the visited set*/
-        LinkedList<PathElement> ret = new LinkedList<PathElement>();
-        System.out.print("Found path!\n");
-
-
-        /*Using PathElement previous field, we search backwards trough visited, and create list of PathElements
-         indicating path from start to end, that is passable by our robot
-         (PathElement with loc = start is not included on returned list */
-        while (!p.loc.equals(start)) {
-            ret.addFirst(p);
-            int index = findLocation(visited, p.previous);
-            if (index < 0) {
-                return null;
-            }
-            p = visited.remove(index);
-        }
-       
-        return ret;
-    }
+    
 
     public void findFluxDeposit() {
     /*This method finds uncaptured flux source*/
         FluxDeposit depositArray[];
         FluxDepositInfo depositInfo = null;
         Direction dir;
+        MapLocation tempTarget;
         int i = 0;
 
         while(true) {
@@ -208,7 +164,7 @@ public class RobotPlayer implements Runnable {
                 for ( i = 0; i < depositArray.length; i++) {
                     try {
                         depositInfo = myRC.senseFluxDepositInfo(depositArray[i]);
-                        if ( (myRC.senseGroundRobotAtLocation(depositInfo.location) == null) &&
+                        if ( (myRC.senseAirRobotAtLocation(depositInfo.location) == null) &&
                             (depositInfo.team != myRC.getTeam() ) ) {
                             currentFluxDepositLoc = depositInfo.location;
                             currentFluxDeposit = depositArray[i];
@@ -222,12 +178,8 @@ public class RobotPlayer implements Runnable {
                 }
             }
             dir = myRC.senseDirectionToUnownedFluxDeposit();
-           if (dir != Direction.NONE) {
-                if (!move(dir)) {
-                    return;
-                }
-           }
-        
+            tempTarget = addToLoc(myRC.getLocation(), dir, 1);
+            travelToLocation(tempTarget);
 
 
         }
@@ -235,18 +187,48 @@ public class RobotPlayer implements Runnable {
 
     public void travelToLocation(MapLocation target) {
         /*Right now, it's just the basic pathfinding(AKA just go straight)*/
+        /**/
         Direction dir;
         MapLocation current;
         int count;
+        int blocked = 0;
         if (target == null)
             return;
         while (!myRC.getLocation().equals(target)) {
             current = myRC.getLocation();
             count = 0;
             dir = current.directionTo(target);
-           
-            while ((!myRC.canMove(dir)) && (count <4)) {
-                dir.rotateRight();
+            try {
+                if (myRC.canSenseSquare(target)) {
+                    /*we need to check if someone isn't occupyuing our tart=get location*/
+                    switch (myRC.getRobotType()) {
+                        case ARCHON:
+                            if (myRC.senseAirRobotAtLocation(target) != null) {
+                                blocked++;
+                            } else {
+                                blocked--;
+                            }
+                            break;
+                        case WORKER:
+                            if (myRC.senseGroundRobotAtLocation(target) != null) {
+                                blocked++;
+                            } else {
+                                blocked--;
+                            }
+                            break;
+                    }
+                    if (blocked >= 3) {
+                        return;
+                    }
+                } else {
+                    /*we can't ssense our target*/
+                    current = addToLoc(myRC.getLocation(), myRC.getLocation().directionTo(target), 4);
+                    current = targetNearby(current);
+                    travelToLocation(current);
+                }
+            } catch (Exception e) {}
+            while ((!myRC.canMove(dir)) && (count < 8)) {
+                dir = dir.rotateRight();
                 count++;
             }
             if (!move(dir)) {
@@ -256,49 +238,67 @@ public class RobotPlayer implements Runnable {
         }
     }
 
-
-    public boolean sendBlockMessage() {
-        /*This assumes that worker was just spawned on top of flux deposit*/
+    public boolean sendMessage(String type, MapLocation locs[], int ints[])
+    {
         Message m = new Message();
         m.strings = new String[1];
-        m.locations = new MapLocation[1];
-        m.strings[0] = "B";
-        m.locations[0] = currentFluxDepositLoc;
-        myRC.yield();
+        m.strings[0] = type;
+        m.locations = locs;
+        m.ints = ints;
+        if (myRC.hasActionSet()) {
+            myRC.yield();
+        }
         try {
             myRC.broadcast(m);
         } catch (Exception e) {return false;}
         return true;
     }
+   
 
     public boolean spawnWorker() {
         if (myRC.hasActionSet()) {
             myRC.yield();
         }
+        
         while (myRC.getCurrentAction() != ActionType.IDLE) {
+            myRC.yield();
+        }
+        while (myRC.getEnergonLevel() <= 15) {
             myRC.yield();
         }
         try {
             myRC.spawn(RobotType.WORKER);
             myRC.yield();
             for (int i = 0; i < 15; i++) {
-                myRC.transferEnergon(1, myRC.getLocation().add(myRC.getDirection()), RobotLevel.ON_GROUND);
+                try {
+                    myRC.transferEnergon(1, myRC.getLocation().add(myRC.getDirection()), RobotLevel.ON_GROUND);
+                } catch (Exception e) {}
                 myRC.yield();
             }
-            Message me = new Message();
-            me.ints = new int[1];
-            me.locations = new MapLocation[2];
-            me.strings = new String[1];
-            me.ints[0] = archonNumber;
-            me.strings[0] = "W";
-            me.locations[0]= myRC.getLocation().add(myRC.getDirection());
-            me.locations[1] = currentFluxDepositLoc;
-            if (myRC.hasActionSet()) {
-                myRC.yield();
+            
+            int ints[] = new int[2];
+            MapLocation locations[] = new MapLocation[2];
+            ints[0] = archonNumber;
+            ints[1] = dirToInt(stairs);
+            locations[0]= myRC.getLocation().add(myRC.getDirection());
+            locations[1] = currentFluxDepositLoc;
+            if (!sendMessage("W", locations, ints) ) {
+                return false;
             }
-            myRC.broadcast(me);
+
         } catch (Exception e) {return false;}
+        this.workerCount++;
         return true;
+
+    }
+
+    private boolean isFreeAndPassable(MapLocation target) {
+        try {
+            if (isPassable(target) && (myRC.senseGroundRobotAtLocation(target) == null)) {
+                return true;
+            }
+        } catch (Exception e) {}
+        return false;
 
     }
 
@@ -308,32 +308,31 @@ public class RobotPlayer implements Runnable {
             for (int i = 0; i < newMesg.length; i++) {
                 Message mes = newMesg[i];
                 if ((mes.strings[0]).equals("m")) {
-                    if (mes.locations[0].equals(currentFluxDepositLoc)) {
-                        currentFluxDeposit = null;
-                        currentFluxDepositLoc = null;
-                        state = RobotState.FLUX_SEARCH;
+                    if (mes.locations[0].equals(currentFluxDepositLoc) && mes.ints[0] != archonNumber) {
+                        
+                            currentFluxDeposit = null;
+                            currentFluxDepositLoc = null;
+                            state = RobotState.FLUX_SEARCH;
+                        
                         
                     }
                 }
 
-                if ((mes.strings[0]).equals("E")) {
+                /*if ((mes.strings[0]).equals("E")) {
                     travelToLocation(mes.locations[0].subtract(myRC.getDirection()));
                     for (int j = 0; j < 15; j++) {
                         try {
                             myRC.transferEnergon(1, mes.locations[0], RobotLevel.ON_GROUND);
                         } catch (Exception e) {}
                     }
+                }*/
+
+                if (mes.strings[0].equals("A") && mes.ints[0] == archonNumber) {
+                    waiting--;
                 }
             }
 
-            Robot r[] = myRC.senseNearbyGroundRobots();
-            for (int j =0; j < r.length; j++) {
-                try {
-                if (myRC.senseRobotInfo(r[j]).location.isAdjacentTo(myRC.getLocation())) {
-                    myRC.transferEnergon(1,myRC.senseRobotInfo(r[j]).location , RobotLevel.ON_GROUND);
-                }
-                } catch (Exception e) {}
-            }
+            refillAdjacent();
             switch (state) {
                 case START:
                     archonLocation = myRC.senseAlliedArchons();
@@ -355,23 +354,60 @@ public class RobotPlayer implements Runnable {
                         }
                     }
                     state = RobotState.FLUX_SEARCH;
+                    break;
                 case FLUX_SEARCH:
                     findFluxDeposit();
                    
                     break;
 
+                case BLOCK_SEARCH_START:
+                    /*spawn 4 workers*/
+                    
+                    Direction dir = myRC.getDirection();
+                    for (int m = 0; m < 4; m++) {
+                        int count = 0;
+                        myRC.yield();
+                        while (!isFreeAndPassable(myRC.getLocation().add(dir))) {
+                            dir = dir.rotateRight();
+                            try {
+                                myRC.yield();
+                                myRC.setDirection(dir);
+                            } catch (Exception e ) {}
+                            myRC.yield();
+                            count++;
+                            if (count >= 8) {
+                                break;
+                            }
+                            
+                        }
+                        spawnWorker();
+                        
+                    }
+                    waiting = workerCount;
+                    this.state = RobotState.BLOCK_SEARCH;
+                    break;
                 case BLOCK_SEARCH:
-                    if (!myRC.getLocation().equals(currentFluxDepositLoc)) {
-                        travelToLocation(currentFluxDepositLoc);
+                   
+                    /*find nearby blocks, workers follow*/
+                    MapLocation arr[] =  myRC.senseNearbyBlocks();
+                    if (arr.length == 0) {
+                        break;
                     }
                     try {
-                        FluxDepositInfo inf = myRC.senseFluxDepositInfo(currentFluxDeposit);
-                        if (inf.roundsAvailableAtCurrentHeight == 0) {
-                            this.state = RobotState.FLUX_SEARCH;
-                        }
+                    if (myRC.senseFluxDepositInfo(currentFluxDeposit).roundsAvailableAtCurrentHeight == 0) {
+                        this.state = RobotState.FLUX_SEARCH;
+                    }
                     } catch (Exception e) {}
-                    break;
+                    /*currentTarget = arr[0];
+                    int is[] = new int[1];
+                    is[0] = archonNumber;
+                    sendMessage("F", arr, is);
+                    this.state = RobotState.BLOCK_WAIT;
+                    */
 
+                    break;
+                case BLOCK_WAIT:
+                    break;
                 case FLUX_CAPTURE:
                     travelToLocation(currentFluxDepositLoc);
                     myRC.yield();
@@ -383,13 +419,19 @@ public class RobotPlayer implements Runnable {
                                 m.locations[0] = currentFluxDepositLoc;
                                 m.strings = new String[1];
                                 m.strings[0] = "m";
+                                m.ints = new int[1];
+                                m.ints[0] = archonNumber;
                                 myRC.yield();
                                 myRC.broadcast(m);
-                                state = RobotState.BLOCK_SEARCH;
+                                myRC.yield();
+                                myRC.yield();
+                                state = RobotState.BLOCK_SEARCH_START;
+                                stairs = findStairs(currentFluxDepositLoc);
+                               
                             } else {break;}
                     } catch (Exception e) {}
                    
-                    spawnWorker();
+                    
                     break;
                     
 
@@ -400,42 +442,29 @@ public class RobotPlayer implements Runnable {
             myRC.yield();
         }
     }
-    
-    public boolean workerGoTo(MapLocation target) {
-         if (target == null) {
-             return false;
-         }
-         
-       
-         
-         while (!myRC.getLocation().equals(target)) {  
-/*First, we figure furthest square (tempTarget) in direction to real target, that is traversable by our robot*/
-            MapLocation tempTarget = myRC.getLocation();
-            Direction dir = tempTarget.directionTo(target);
-            while (myRC.canSenseSquare(tempTarget) &&
-                    (!tempTarget.equals(target)) &&
-                    myRC.senseTerrainTile(tempTarget).isTraversableAtHeight(myRC.getRobot().getRobotLevel())) {
-                tempTarget = tempTarget.add(dir);
-            }
-            if (!tempTarget.equals(target)) {
-                tempTarget = tempTarget.subtract(dir);
-            }
-            
 
-            List<PathElement> path = localPathFind(myRC.getLocation(), tempTarget);
-            if (path == null) {
-                return false;
-            }
-            for (PathElement p : path) {
-                if (!move(myRC.getLocation().directionTo(p.loc)) ) {
-                    return false;
+    
+
+    private MapLocation targetNearby(MapLocation target) {
+        if (isFreeAndPassable(target)) {
+           return target;
+
+        }
+        for (Direction d : Direction.values()) {
+            if (d != Direction.NONE && d != Direction.OMNI) {
+                if (isFreeAndPassable(target.add(d))) {
+
+                    return (target.add(d));
                 }
             }
-         }
-            
-            
-            
-            return true;
+        }
+
+        return null;
+    }
+
+    private void travelNearLocation(MapLocation target) {
+        MapLocation tmp = targetNearby(target);
+        travelToLocation(tmp);
     }
 
     public boolean energonLow() {
@@ -446,114 +475,241 @@ public class RobotPlayer implements Runnable {
     }
 
 
+    public boolean isForbiddenToLoad(MapLocation from) {
+        if (from == null) {
+            return true;
+        }
+        for (int i = 0 ; i < 6; i++) {
+            if (addToLoc(currentFluxDepositLoc, stairs, i).equals(from) ){
+                return true;
+
+            }
+        }
+
+
+        return false;
+    }
+
     public boolean canLoadBlock(MapLocation from, MapLocation target) {
-        if (from == null || target == null || from.equals(target)) {
+        if (from == null || target == null) {
             return false;
+        }
+
+        if (from.equals(target)) {
+            return false;
+        }
+
+        for (int i = 0 ; i < 6; i++) {
+            if (addToLoc(currentFluxDepositLoc, stairs, i).equals(target) ){
+                return false;
+
+            }
         }
 
         if (!from.isAdjacentTo(target)) {
             return false;
         }
+        
+        /*from location must be passable for ground robots*/
+        
+        if (!myRC.canSenseSquare(from)) {
+            return false;
+        }
+        if (!myRC.senseTerrainTile(from).isTraversableAtHeight(RobotLevel.ON_GROUND)) {
+            return false;
+        }
+        
         try {
-        if (Math.abs(myRC.senseHeightOfLocation(target) - myRC.senseHeightOfLocation(from)) > GameConstants.WORKER_MAX_HEIGHT_DELTA) {
+        if (Math.abs(myRC.senseHeightOfLocation(target) - myRC.senseHeightOfLocation(from)) >= GameConstants.WORKER_MAX_HEIGHT_DELTA) {
             return false;
         } }
         catch (Exception e) {return false;}
 
         return true;
     }
-    
+
+    public boolean canUnLoadBlock(MapLocation from, MapLocation target) {
+        if (from == null || target == null) {
+            return false;
+        }
+
+        if (from.equals(target)) {
+            return false;
+        }
+
+
+
+        if (!from.isAdjacentTo(target)) {
+            return false;
+        }
+
+        /*from location must be passable for ground robots*/
+
+        if (!myRC.canSenseSquare(from)) {
+            return false;
+        }
+        if (!myRC.senseTerrainTile(from).isTraversableAtHeight(RobotLevel.ON_GROUND)) {
+            return false;
+        }
+
+        try {
+        if (Math.abs(myRC.senseHeightOfLocation(target) - myRC.senseHeightOfLocation(from)) >= GameConstants.WORKER_MAX_HEIGHT_DELTA) {
+            return false;
+        } }
+        catch (Exception e) {return false;}
+
+        return true;
+    }
     private MapLocation findLocationToUnload(MapLocation to) {
         for (Direction d : Direction.values()) {
             if (d != Direction.OMNI && d != Direction.NONE &&  
-                     !to.add(d).equals(currentFluxDeposit)) {
+                     !to.add(d).equals(currentFluxDepositLoc)) {
                 MapLocation loc, neigh;
                 loc = to;
                 neigh = loc.add(d);
-                if (canLoadBlock(neigh, loc)) {
+                if (canUnLoadBlock(neigh, loc)) {
                     return neigh;
                 }
             }
         }
         return null;                            
     }
-
+    
+    private MapLocation findLocationToLoad(MapLocation to) {
+        return findLocationToUnload(to);
+    }
+    
     public void runWorker() {
         Message m;
         MapLocation l = null;
 
         while (true)  {
-            if (energonLow() && (this.state != RobotState.FIND_ENERGON)) {
+            /*if (energonLow() && (this.state != RobotState.FIND_ENERGON)) {
 
                 this.prevState = this.state;
                 this.state = RobotState.FIND_ENERGON;
             }
             if ((this.state == RobotState.FIND_ENERGON) && (!energonLow())) {
                 this.state = this.prevState;
-            }
+            }*/
             m = myRC.getNextMessage();
             if (m != null) {
                 if (m.strings[0].equals("W")) {
                     if (m.locations[0].equals(myRC.getLocation())) {
                         /*This message is for that robot*/
                         this.archonNumber = m.ints[0];
+                        this.stairs = intToDir(m.ints[1]);
                         this.currentFluxDepositLoc = m.locations[1];
                         this.state = RobotState.BLOCK_GATHER;
-                        System.out.printf("My archon num %d", archonNumber);
+                        
                     }
+                }
+
+                if (m.strings[0].equals("F") && (m.ints[0] == archonNumber)) {
+                    this.state = RobotState.FOLLOW_ARCHON;
+                    currentTarget = m.locations[0];
                 }
 
 
             }
             switch (state) {
                 case START:
-                   
+                    myRC.yield();
                     break;
                 case BLOCK_GATHER:
                     MapLocation blocks[] = myRC.senseNearbyBlocks();
-                   
+                    MapLocation temporaryTarget, loc = null;
+                    
                     for (int j = 0; j < blocks.length; j++) {
-                        for (Direction d : Direction.values()) {
-                            if (d != Direction.OMNI && d != Direction.NONE &&
-                                    !blocks[j].equals(currentFluxDepositLoc)) {
-                                MapLocation loc, neigh;
-                                loc = blocks[j];
-                                neigh = loc.add(d);
-                                if (canLoadBlock(neigh, loc)) {
-                                    
-                                    travelToLocation(neigh);
-                                    myRC.yield();
-                                    try {
-                                        myRC.loadBlockFromLocation(loc);
-                                        hasBlocks = true;
-                                        break;
-                                    } catch (Exception e) {}
+                        
+                        if (!isForbiddenToLoad(blocks[j])) {
+                            travelToLocation(blocks[j]);
+                            loc = blocks[j];
+                            for (Direction d : Direction.values()) {
+                                if (d != Direction.OMNI && d != Direction.NONE) {
+
+                                    MapLocation neigh;
+                                    neigh = loc.add(d);
+                                    if (canLoadBlock(neigh, loc)) {
+
+                                        travelToLocation(neigh);
+                                        myRC.yield();
+                                        try {
+                                            while(myRC.isMovementActive()) {
+                                                myRC.yield();
+                                            }
+                                            myRC.loadBlockFromLocation(loc);
+                                            hasBlocks = true;
+                                            break;
+                                        } catch (Exception e) {}
+                                    }
                                 }
                             }
-                        }
                         if (hasBlocks) {
                             this.state = RobotState.BLOCK_RETURN;
                             break;
                         }
-
+                            
+                            break;
+                        }
                     }
+                    
+                    if (loc == null) {
+                        /*TODO find some blocks*/
+                        while (isForbiddenToLoad(myRC.getLocation())) {
+                            move(stairs.rotateRight());
+                        }
+                        break;
+                    }
+                    
+                    
+
                     /*at least one location with blocks nearby*/
 
                     
                     break;
                 case BLOCK_RETURN:
-                    MapLocation neigh = findLocationToUnload(currentFluxDepositLoc);
-                    if (neigh == null) { break; }
+                  /*  travelToLocation(currentFluxDepositLoc);*/
                     
-                    travelToLocation(neigh);
-                    myRC.yield();
-                    try {
-                        myRC.unloadBlockToLocation(currentFluxDepositLoc);
-                        hasBlocks = false;
-                        this.state = RobotState.BLOCK_GATHER;
+                    travelToLocation(currentFluxDepositLoc);
+                    
+                    
+                    MapLocation unloadTarget = currentFluxDepositLoc;
+                    while (true) {
+                        while (!myRC.canSenseSquare(unloadTarget)) {
+                            move(myRC.getLocation().directionTo(unloadTarget));
+                        }
+                        MapLocation neigh = findLocationToUnload(unloadTarget);
+                        if (neigh == null) {
+                            unloadTarget = unloadTarget.add(stairs);
+                            continue;
+                        }
+                    
+                        travelToLocation(neigh);
+
+                        while (myRC.isMovementActive()) {
+                            myRC.yield();
+                        }
+                        try {
+                            myRC.unloadBlockToLocation(unloadTarget);
+                            hasBlocks = false;
+                            this.state = RobotState.BLOCK_GATHER;
+                            break;
+                        } catch (GameActionException e) {}
+                    }
+                    break;
+                case FOLLOW_ARCHON:
+                    MapLocation tempTarget = targetNearby(currentTarget);
+                    if (tempTarget == null) {
                         break;
-                    } catch (Exception e) {}
-                                
+                    }
+
+                    travelToLocation(tempTarget);
+                    if (myRC.getLocation().equals(tempTarget)) {
+                        int tab_i[] = new int[1];
+                        tab_i[0] = archonNumber;
+                        sendMessage("A", null, tab_i);
+                    }
                     break;
                     
                 case FIND_ENERGON:
@@ -573,7 +729,7 @@ public class RobotPlayer implements Runnable {
                             myRC.broadcast(m);
                         } catch (Exception e) {}
                     } else {
-                        workerGoTo(currentFluxDepositLoc);
+                        myRC.yield();
                     }
                     if (!energonLow()) {
                         this.state = this.prevState;
