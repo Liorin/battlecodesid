@@ -18,7 +18,9 @@ public class Worker extends AbstractRobot {
         FOLLOW_ARCHON,
         BLOCK_RETURN,
         FIND_ENERGON,
-        START
+        START,
+        TRAVEL_NEARBY,
+        TRAVEL_TO
     }
     private WorkerState state , prevState;
 
@@ -114,38 +116,38 @@ public class Worker extends AbstractRobot {
         return true;
     }
     private MapLocation findLocationToUnload(MapLocation to) {
+        int height = 100;
+        MapLocation cand = null;
         for (Direction d : Direction.values()) {
             if (d != Direction.OMNI && d != Direction.NONE &&  
                      !to.add(d).equals(currentFluxDepositLoc)) {
                 MapLocation loc, neigh;
                 loc = to;
                 neigh = loc.add(d);
-                if (canUnLoadBlock(neigh, loc)) {
-                    return neigh;
-                }
+                try {
+                    if (canUnLoadBlock(neigh, loc) && height > myRC.senseHeightOfLocation(neigh)) {
+                        cand = neigh;
+                        height = myRC.senseHeightOfLocation(neigh);
+                    }
+                } catch (Exception e) {}
             }
         }
-        return null;                            
+        return cand;
     }
+
+
+
     
     private MapLocation findLocationToLoad(MapLocation to) {
         return findLocationToUnload(to);
     }
+    protected void refillAdjacent() {
 
-    public void run() {
+    }
+    
+    protected void getMessage() {
         Message m;
-        MapLocation l = null;
-
-        while (true)  {
-            /*if (energonLow() && (this.state != RobotState.FIND_ENERGON)) {
-
-                this.prevState = this.state;
-                this.state = RobotState.FIND_ENERGON;
-            }
-            if ((this.state == RobotState.FIND_ENERGON) && (!energonLow())) {
-                this.state = this.prevState;
-            }*/
-            m = myRC.getNextMessage();
+        m = myRC.getNextMessage();
             if (m != null) {
                 if (m.strings[0].equals("W")) {
                     if (m.locations[0].equals(myRC.getLocation())) {
@@ -165,18 +167,56 @@ public class Worker extends AbstractRobot {
 
 
             }
+    }
+
+    private boolean onStairs() {
+        Robot rs[] = myRC.senseNearbyGroundRobots();
+        RobotInfo in;
+        for (Robot r: rs) {
+            if (r.equals(myRC.getRobot())) {
+                continue;
+            }
+            try {
+                in = myRC.senseRobotInfo(r);
+                for (int k=0; k < 4; k++) {
+                    if (in.location.equals(addToLoc(currentFluxDepositLoc, stairs, k))) {
+                        return true;
+                    }
+                }
+            } catch (Exception e) {}
+
+        }
+        return false;
+    }
+
+    public void run() {
+        
+        MapLocation l = null;
+
+        while (true)  {
+            /*if (energonLow() && (this.state != RobotState.FIND_ENERGON)) {
+
+                this.prevState = this.state;
+                this.state = RobotState.FIND_ENERGON;
+            }
+            if ((this.state == RobotState.FIND_ENERGON) && (!energonLow())) {
+                this.state = this.prevState;
+            }*/
+            getMessage();
             switch (state) {
+                
+                
                 case START:
                     myRC.yield();
                     break;
                 case BLOCK_GATHER:
                     MapLocation blocks[] = myRC.senseNearbyBlocks();
-                    MapLocation temporaryTarget, loc = null;
+                    MapLocation loc = null;
 
                     for (int j = 0; j < blocks.length; j++) {
 
                         if (!isForbiddenToLoad(blocks[j])) {
-                            travelToLocation(blocks[j]);
+                            
                             loc = blocks[j];
                             for (Direction d : Direction.values()) {
                                 if (d != Direction.OMNI && d != Direction.NONE) {
@@ -209,10 +249,7 @@ public class Worker extends AbstractRobot {
 
                     if (loc == null) {
                         /*TODO find some blocks*/
-                        while (isForbiddenToLoad(myRC.getLocation())) {
-                            move(stairs.rotateRight());
-                        }
-                        break;
+                        
                     }
 
 
@@ -223,22 +260,27 @@ public class Worker extends AbstractRobot {
                     break;
                 case BLOCK_RETURN:
                   /*  travelToLocation(currentFluxDepositLoc);*/
-
-                    travelToLocation(currentFluxDepositLoc);
+                    /*travelToLocation(currentFluxDepositLoc);*/
 
 
                     MapLocation unloadTarget = currentFluxDepositLoc;
                     while (true) {
-                        while (!myRC.canSenseSquare(unloadTarget)) {
+                        while (myRC.getLocation().distanceSquaredTo(unloadTarget) > 7) {
                             move(myRC.getLocation().directionTo(unloadTarget));
                         }
                         MapLocation neigh = findLocationToUnload(unloadTarget);
                         if (neigh == null) {
                             unloadTarget = unloadTarget.add(stairs);
-                            
-                        } else {
+                            continue;
+                        }
+                        if (findLocationToUnload(neigh) == null ) {
+                            unloadTarget = unloadTarget.add(stairs).add(stairs);
+                        }
+                        else {
+
 
                             travelToLocation(neigh);
+
 
                             while (myRC.isMovementActive()) {
                                 myRC.yield();
@@ -274,7 +316,8 @@ public class Worker extends AbstractRobot {
                     /*very simple, if there are archons nearby, ask them
                      if not, travel to current Flux deposit*/
                     if (myRC.senseNearbyAirRobots().length > 0) {
-                        m = new Message();
+
+                        Message m = new Message();
                         m.strings = new String[1];
                         m.locations = new MapLocation[1];
                         m.strings[0]="E";

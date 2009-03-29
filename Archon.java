@@ -20,7 +20,8 @@ public class Archon extends AbstractRobot {
         BLOCK_SEARCH,
         BLOCK_SEARCH_START,
         FLUX_GATHER,
-        BLOCK_WAIT
+        BLOCK_WAIT,
+        ATTACK
 
     }
 
@@ -34,8 +35,22 @@ public class Archon extends AbstractRobot {
         super(rc);
         this.state = RobotState.START;
     }
+    protected int countRobots(RobotType type, Team t) {
+        int robotCount = 0;
+        Robot nearRobots[] = myRC.senseNearbyGroundRobots();
+        for (Robot r: nearRobots) {
+            try {
+                RobotInfo inf = myRC.senseRobotInfo(r);
+                if (inf.team.equals(t) && inf.type == type) {
+                    robotCount++;
+                }
+            } catch (Exception e) {}
+        }
+        return robotCount;
+    }
 
-     private Direction findStairs(MapLocation start) {
+
+    private Direction findStairs(MapLocation start) {
         Direction dir = Direction.EAST; /*na wschodzie musi byc jakaś cywilizacja*/
         int count = 0;
         int free_fields;
@@ -66,7 +81,7 @@ public class Archon extends AbstractRobot {
         MapLocation tempTarget;
         int i = 0;
 
-        while(true) {
+        
 
             depositArray = myRC.senseNearbyFluxDeposits();
             if (depositArray.length != 0) {
@@ -86,12 +101,13 @@ public class Archon extends AbstractRobot {
 
                 }
             }
+            
+            
             dir = myRC.senseDirectionToUnownedFluxDeposit();
-            tempTarget = addToLoc(myRC.getLocation(), dir, 1);
-            travelToLocation(tempTarget);
+            move(dir);
 
 
-        }
+        
     }
 
     private boolean spawnWorker() {
@@ -131,8 +147,8 @@ public class Archon extends AbstractRobot {
 
     }
 
-    private boolean spawnSoldier() {
-        if (myRC.hasActionSet()) {
+    private boolean spawnSoldier(MapLocation target) {
+       if (myRC.hasActionSet()) {
             myRC.yield();
         }
 
@@ -143,6 +159,12 @@ public class Archon extends AbstractRobot {
             myRC.yield();
         }
         try {
+            int tempCount = 0;
+            while (!isFreeAndPassable(myRC.getLocation().add(myRC.getDirection())) && tempCount < 8) {
+                myRC.setDirection(myRC.getDirection().rotateRight());
+                myRC.yield();
+                tempCount ++;
+            }
             myRC.spawn(RobotType.SOLDIER);
             myRC.yield();
             for (int i = 0; i < 15; i++) {
@@ -151,8 +173,7 @@ public class Archon extends AbstractRobot {
                 } catch (Exception e) {}
                 myRC.yield();
             }
-
-
+            
 
         } catch (Exception e) {return false;}
         
@@ -160,15 +181,15 @@ public class Archon extends AbstractRobot {
 
     }
 
-
-    private void refillAdjacent() {
+    @Override
+    protected void refillAdjacent() {
         try {
 
             for (Direction d : Direction.values()) {
                 if (d != Direction.OMNI) {
                     MapLocation loc = myRC.getLocation().add(d);
                     Robot r = myRC.senseGroundRobotAtLocation(loc);
-                    if (r != null) {
+                    if (r != null && myRC.senseRobotInfo(r).team == myTeam) {
                         myRC.transferEnergon(1, loc, RobotLevel.ON_GROUND);
                         myRC.yield();
                     }
@@ -177,63 +198,102 @@ public class Archon extends AbstractRobot {
         } catch (Exception e) {}
 
     }
-    public boolean senseDanger() {
+    
+    protected RobotInfo senseDanger() {
         Robot rs[];
+        RobotInfo inf = null;
         rs = myRC.senseNearbyGroundRobots();
         for (Robot r : rs) {
             try {
-                if (myRC.senseRobotInfo(r).team != myTeam) {
-                    return true;
+                if ( (inf = myRC.senseRobotInfo(r)).team != myTeam) {
+                    return inf;
                 }
 
             } catch (Exception e) {}
 
         }
 
-        return false;
+        return null;
     }
+    
+    protected void getMessage() {
+        
+                
+        Message mes = myRC.getNextMessage();
+        if (mes == null) {
+            return;
+        }
+        if ((mes.strings[0]).equals("m")) {
+            if (mes.locations[0].equals(currentFluxDepositLoc) && mes.ints[0] != archonNumber) {
 
+                            
+                currentFluxDeposit = null;
+                currentFluxDepositLoc = null;
+                            /*Scatter the archons*/
+
+                Direction scatterDir = intToDir(generator.nextInt(8)+1);
+                for (int k = 0; k < 10; k++) {
+                    move(scatterDir);
+                }
+                state = RobotState.FLUX_SEARCH;
+            }
+        }
+        if (mes.strings[0].equals("A") && mes.ints[0] == archonNumber) {
+                    waiting--;
+        }
+    }
+    
     public void run() {
         while (true) {
-            Message newMesg[] = myRC.getAllMessages();
-            for (int i = 0; i < newMesg.length; i++) {
-                Message mes = newMesg[i];
-                if ((mes.strings[0]).equals("m")) {
-                    if (mes.locations[0].equals(currentFluxDepositLoc) && mes.ints[0] != archonNumber) {
-
-                            currentFluxDeposit = null;
-                            currentFluxDepositLoc = null;
-                            /*Scatter the archons*/
-                            Direction scatterDir = myRC.senseDirectionToUnownedFluxDeposit().opposite();
-                            for (int k = 0; k < 10; k++) {
-                                move(scatterDir);
-                            }
-                            state = RobotState.FLUX_SEARCH;
-
-
-                    }
-                }
-
-                /*if ((mes.strings[0]).equals("E")) {
-                    travelToLocation(mes.locations[0].subtract(myRC.getDirection()));
-                    for (int j = 0; j < 15; j++) {
-                        try {
-                            myRC.transferEnergon(1, mes.locations[0], RobotLevel.ON_GROUND);
-                        } catch (Exception e) {}
-                    }
-                }*/
-
-                if (mes.strings[0].equals("A") && mes.ints[0] == archonNumber) {
-                    waiting--;
-                }
-            }
-
+            getMessage();
+            
             refillAdjacent();
-            if (senseDanger() ) {
-                
+            if (senseDanger() != null) {
+                state = RobotState.ATTACK;
             }
             switch (state) {
+                case ATTACK:
+                    RobotInfo r = senseDanger();
+                    if (r == null) {
+                        if (currentFluxDepositLoc == null) {
+                            state = RobotState.FLUX_SEARCH;
+                        } else {
+                            state = RobotState.FLUX_CAPTURE;
+                        }
+                        break;
+                    } else {
+                        int count = 0;
+                        Direction kier = myRC.getDirection();
+                        myRC.yield();
+                        while (!isFreeAndPassable(myRC.getLocation().add(kier))) {
+                            kier = kier.rotateRight();
+                            try {
+                                myRC.yield();
+                                myRC.setDirection(kier);
+                            } catch (Exception e ) {}
+                            myRC.yield();
+                            count++;
+                            if (count >= 8) {
+                                break;
+                            }
+
+                        }
+                        try {
+                            spawnSoldier(r.location);
+                        } catch (Exception e) {}
+                    }
+                    int ints[] = new int[2];
+                    MapLocation locations[] = new MapLocation[2];
+                    ints[0] = archonNumber;
+
+                    locations[0]= null;
+                    locations[1] = r.location;
+                    myRC.yield();
+                    sendMessage("ATTACK", locations, ints);
+                    
+                    break;
                 case START:
+                    generator.setSeed(myRC.getRobot().getID());
                     archonLocation = myRC.senseAlliedArchons();
                     int i;
                     for (i = 0; i < archonLocation.length ; i++) {
@@ -288,13 +348,16 @@ public class Archon extends AbstractRobot {
                     break;
                 case BLOCK_SEARCH:
 
-                    /*find nearby blocks, workers follow*/
-                    MapLocation arr[] =  myRC.senseNearbyBlocks();
-                    if (arr.length == 0) {
-                        break;
-                    }
+                    /*int soldiers = countRobots(RobotType.SOLDIER, myTeam);
+                    while (soldiers < 2) {
+                        if (spawnSoldier()) {
+                            soldiers++;
+                        };
+                    }*/
                     try {
                     if (myRC.senseFluxDepositInfo(currentFluxDeposit).roundsAvailableAtCurrentHeight == 0) {
+                        currentFluxDeposit = null;
+                        currentFluxDepositLoc = null;
                         this.state = RobotState.FLUX_SEARCH;
                     }
                     } catch (Exception e) {}
@@ -309,7 +372,23 @@ public class Archon extends AbstractRobot {
                 case BLOCK_WAIT:
                     break;
                 case FLUX_CAPTURE:
-                    travelToLocation(currentFluxDepositLoc);
+                    if (myRC.canSenseSquare(currentFluxDepositLoc)) {
+                        try {
+                            if (myRC.senseAirRobotAtLocation(currentFluxDepositLoc) != null) {
+                                this.state = RobotState.FLUX_SEARCH;
+                                
+                                travelToLocation(randomTarget(10, myRC.getLocation()));
+                                
+
+                                break;
+                            }
+                        } catch (Exception e) {}
+                    }
+                    
+                    move(myRC.getLocation().directionTo(currentFluxDepositLoc));
+
+
+
                     myRC.yield();
                     try{
                         if ( (myRC.getLocation().equals(currentFluxDepositLoc)) ) {
@@ -323,7 +402,7 @@ public class Archon extends AbstractRobot {
                                 myRC.yield();
                                 myRC.broadcast(m);
                                 myRC.yield();
-                                myRC.yield();
+                                
                                 state = RobotState.BLOCK_SEARCH_START;
                                 stairs = findStairs(currentFluxDepositLoc);
 
